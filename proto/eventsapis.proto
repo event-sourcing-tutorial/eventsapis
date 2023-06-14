@@ -1,0 +1,47 @@
+syntax = "proto3";
+package eventsapis;
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+service EventsApis {
+    rpc GetLastIdx (GetLastIdxRequest) returns (GetLastIdxResponse);
+    rpc InsertEvent (InsertEventRequest) returns (InsertEventResponse);
+    rpc GetEvent (GetEventRequest) returns (GetEventResponse);
+    rpc PollEvents (PollEventsRequest) returns (stream PollEventsResponse);
+}
+
+message GetLastIdxRequest {
+}
+
+message GetLastIdxResponse {
+  int64 last_idx = 1;
+}
+
+message InsertEventRequest {
+  int64 idx = 1;
+  google.protobuf.Value payload = 2;
+}
+
+message InsertEventResponse {
+  bool success = 1;
+}
+
+message GetEventRequest {
+  int64 idx = 1;
+}
+
+message GetEventResponse {
+  bool found = 1;
+  google.protobuf.Timestamp inserted = 2;
+  google.protobuf.Value payload = 3;
+}
+
+message PollEventsRequest {
+  int64 last_idx = 1;
+}
+
+message PollEventsResponse {
+  int64 idx = 1;
+  google.protobuf.Timestamp inserted = 2;
+  google.protobuf.Value payload = 3;
+}
