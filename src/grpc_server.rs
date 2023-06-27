@@ -1,10 +1,10 @@
-use self::eventsapis::{
+use crate::{message::Message, pgpool::PgPool};
+use anystruct::{IntoJSON, IntoProto};
+use eventsapis_proto::{
     events_apis_server::{EventsApis, EventsApisServer},
     GetEventRequest, GetEventResponse, GetLastIdxRequest, GetLastIdxResponse, InsertEventRequest,
     InsertEventResponse, PollEventsRequest, PollEventsResponse,
 };
-use crate::{message::Message, pgpool::PgPool};
-use anystruct::{IntoJSON, IntoProto};
 use futures::pin_mut;
 use log::trace;
 use std::{sync::Arc, time::SystemTime};
@@ -14,10 +14,6 @@ use tokio::sync::{
 };
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::{transport::Server, Request, Response, Status};
-
-mod eventsapis {
-    tonic::include_proto!("eventsapis");
-}
 
 struct GrpcServer {
     pool: Arc<PgPool>,

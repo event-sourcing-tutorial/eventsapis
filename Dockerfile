@@ -8,9 +8,7 @@ RUN cargo install cargo-watch
 RUN mkdir /app
 COPY ./Cargo.toml /app/Cargo.toml
 COPY ./Cargo.lock /app/Cargo.lock
-COPY ./build.rs /app/build.rs
 COPY ./src /app/src
-COPY ./proto /app/proto
 WORKDIR /app
 #RUN cargo build
 ENTRYPOINT ["cargo", "watch", "-x", "run --bin server"]

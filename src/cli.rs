@@ -1,17 +1,13 @@
-use crate::eventsapis::{GetEventRequest, GetEventResponse};
 use anystruct::{IntoJSON, IntoProto};
 use clap::{Parser, Subcommand};
-use eventsapis::{
-    events_apis_client::EventsApisClient, GetLastIdxRequest, GetLastIdxResponse,
-    InsertEventRequest, InsertEventResponse, PollEventsRequest, PollEventsResponse,
+use eventsapis_proto::{
+    events_apis_client::EventsApisClient, GetEventRequest, GetEventResponse, GetLastIdxRequest,
+    GetLastIdxResponse, InsertEventRequest, InsertEventResponse, PollEventsRequest,
+    PollEventsResponse,
 };
 use std::process::exit;
 use time::{format_description::well_known::Rfc3339, Duration, OffsetDateTime};
 use tonic::Request;
-
-mod eventsapis {
-    tonic::include_proto!("eventsapis");
-}
 
 #[derive(Debug, Parser)]
 #[command(name = "cli")]
