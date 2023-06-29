@@ -188,11 +188,30 @@ pub async fn start(
     pool: Arc<PgPool>,
     msgrx: Receiver<Arc<Message>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "0.0.0.0:40001".parse()?;
-    let server = GrpcServer::new(pool, msgrx);
-    Server::builder()
-        .add_service(EventsApisServer::new(server))
-        .serve(addr)
-        .await?;
+    let jh1 = tokio::spawn({
+        let msgrx = msgrx.resubscribe();
+        let pool = pool.clone();
+        async {
+            let addr = "0.0.0.0:40001".parse().unwrap();
+            let server = GrpcServer::new(pool, msgrx);
+            Server::builder()
+                .add_service(EventsApisServer::new(server))
+                .serve(addr)
+                .await
+                .unwrap();
+        }
+    });
+    let jh2 = tokio::spawn(async {
+        let addr = "0.0.0.0:40002".parse().unwrap();
+        let server = GrpcServer::new(pool, msgrx);
+        Server::builder()
+            .accept_http1(true)
+            .add_service(tonic_web::enable(EventsApisServer::new(server)))
+            .serve(addr)
+            .await
+            .unwrap();
+    });
+    jh1.await.unwrap();
+    jh2.await.unwrap();
     Ok(())
 }
