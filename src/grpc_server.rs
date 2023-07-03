@@ -17,12 +17,12 @@ use tonic::{transport::Server, Request, Response, Status};
 
 struct GrpcServer {
     pool: Arc<PgPool>,
-    msgrx: Receiver<Arc<EventMessage>>,
+    eventrx: Receiver<Arc<EventMessage>>,
 }
 
 impl GrpcServer {
-    pub fn new(pool: Arc<PgPool>, msgrx: Receiver<Arc<EventMessage>>) -> GrpcServer {
-        GrpcServer { pool, msgrx }
+    pub fn new(pool: Arc<PgPool>, eventrx: Receiver<Arc<EventMessage>>) -> GrpcServer {
+        GrpcServer { pool, eventrx }
     }
 }
 
@@ -80,9 +80,9 @@ impl EventsApis for GrpcServer {
     ) -> Result<Response<Self::PollEventsStream>, Status> {
         let PollEventsRequest { last_idx } = request.into_inner();
         let (tx, rx) = mpsc::channel(16);
-        let msgrx = self.msgrx.resubscribe();
+        let eventrx = self.eventrx.resubscribe();
         let pool = self.pool.clone();
-        tokio::spawn(async move { handle_poll_events(pool, last_idx, tx, msgrx).await });
+        tokio::spawn(async move { handle_poll_events(pool, last_idx, tx, eventrx).await });
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
@@ -133,11 +133,11 @@ async fn select_phase(
 
 async fn stream_phase(
     mut last_idx: i64,
-    msgrx: &mut Receiver<Arc<EventMessage>>,
+    eventrx: &mut Receiver<Arc<EventMessage>>,
     tx: &mpsc::Sender<Result<PollEventsResponse, Status>>,
 ) -> Result<Option<i64>, tokio_postgres::Error> {
     loop {
-        match msgrx.recv().await {
+        match eventrx.recv().await {
             Ok(message) => {
                 let idx = message.idx;
                 if idx == last_idx + 1 {
@@ -167,14 +167,14 @@ async fn handle_poll_events(
     pool: Arc<PgPool>,
     mut last_idx: i64,
     tx: mpsc::Sender<Result<PollEventsResponse, Status>>,
-    mut msgrx: Receiver<Arc<EventMessage>>,
+    mut eventrx: Receiver<Arc<EventMessage>>,
 ) -> Result<(), tokio_postgres::Error> {
     loop {
         match select_phase(last_idx, pool.clone(), &tx).await? {
-            Some(idx) => match stream_phase(idx, &mut msgrx, &tx).await? {
+            Some(idx) => match stream_phase(idx, &mut eventrx, &tx).await? {
                 Some(idx) => {
                     last_idx = idx;
-                    msgrx = msgrx.resubscribe();
+                    eventrx = eventrx.resubscribe();
                 }
                 None => break,
             },
@@ -186,14 +186,14 @@ async fn handle_poll_events(
 
 pub async fn start(
     pool: Arc<PgPool>,
-    msgrx: Receiver<Arc<EventMessage>>,
+    eventrx: Receiver<Arc<EventMessage>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let jh1 = tokio::spawn({
-        let msgrx = msgrx.resubscribe();
+        let eventrx = eventrx.resubscribe();
         let pool = pool.clone();
         async {
             let addr = "0.0.0.0:40001".parse().unwrap();
-            let server = GrpcServer::new(pool, msgrx);
+            let server = GrpcServer::new(pool, eventrx);
             Server::builder()
                 .add_service(EventsApisServer::new(server))
                 .serve(addr)
@@ -203,7 +203,7 @@ pub async fn start(
     });
     let jh2 = tokio::spawn(async {
         let addr = "0.0.0.0:40002".parse().unwrap();
-        let server = GrpcServer::new(pool, msgrx);
+        let server = GrpcServer::new(pool, eventrx);
         Server::builder()
             .accept_http1(true)
             .add_service(tonic_web::enable(EventsApisServer::new(server)))
