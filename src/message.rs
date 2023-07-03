@@ -2,12 +2,12 @@ use crate::pgpool::PgPool;
 use async_trait::async_trait;
 use log::debug;
 use serde_json::Value;
-use std::{str::from_utf8, time::SystemTime};
+use std::{fmt::Debug, str::from_utf8, time::SystemTime};
 use time::{format_description::well_known::Iso8601, OffsetDateTime};
 use tokio_postgres::Row;
 
 #[async_trait]
-pub trait Message {
+pub trait Message: Send + Sync + Debug + 'static {
     fn from_row(row: Row) -> Self;
     fn get_idx(&self) -> i64;
     async fn from_str(payload: &str, pool: &PgPool) -> Self;

@@ -2,7 +2,7 @@ use crate::{message::Message, pgpool::PgPool};
 use futures::StreamExt;
 use futures_util::{pin_mut, TryStreamExt};
 use log::{error, info, trace};
-use std::{collections::VecDeque, fmt::Debug, sync::Arc, time::Duration};
+use std::{collections::VecDeque, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     select,
@@ -22,7 +22,7 @@ enum ConnState<M> {
 }
 
 async fn poll_and_broadcast<
-    M: Message + Send + Sync + Debug,
+    M: Message,
     S: Unpin + AsyncRead + AsyncWrite,
     T: Unpin + AsyncRead + AsyncWrite,
 >(
@@ -97,7 +97,7 @@ async fn poll_and_broadcast<
     }
 }
 
-async fn select_and_broadcast<M: Message + Send + Sync + Debug>(
+async fn select_and_broadcast<M: Message>(
     idx: Option<i64>,
     chan: Chan<M>,
     client: &Client,
@@ -130,7 +130,7 @@ async fn select_and_broadcast<M: Message + Send + Sync + Debug>(
     (idx, chan, error.is_some())
 }
 
-async fn tail_once<M: Message + Send + Sync + Debug + 'static>(
+async fn tail_once<M: Message>(
     idx: Option<i64>,
     chan: Chan<M>,
     config: &Config,
@@ -153,7 +153,7 @@ async fn tail_once<M: Message + Send + Sync + Debug + 'static>(
     }
 }
 
-pub fn start_broadcaster<M: Message + Send + Sync + Debug + 'static>(
+pub fn start_broadcaster<M: Message>(
     config: Config,
     pool: Arc<PgPool>,
 ) -> broadcast::Receiver<Arc<M>> {
