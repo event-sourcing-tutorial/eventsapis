@@ -1,11 +1,8 @@
-use crate::{
-    message::{parse_message, Message},
-    pgpool::PgPool,
-};
+use crate::{message::Message, pgpool::PgPool};
 use futures::StreamExt;
 use futures_util::{pin_mut, TryStreamExt};
 use log::{error, info, trace};
-use std::{collections::VecDeque, sync::Arc, time::Duration};
+use std::{collections::VecDeque, fmt::Debug, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     select,
@@ -17,21 +14,22 @@ use tokio::{
 };
 use tokio_postgres::{AsyncMessage, Client, Config, Connection, NoTls};
 
-type Chan = broadcast::Sender<Arc<Message>>;
+type Chan<M> = broadcast::Sender<Arc<M>>;
 
-enum ConnState {
-    Buffering { buffer: VecDeque<Message> },
-    Streaming { idx: Option<i64>, chan: Chan },
+enum ConnState<M> {
+    Buffering { buffer: VecDeque<M> },
+    Streaming { idx: Option<i64>, chan: Chan<M> },
 }
 
 async fn poll_and_broadcast<
+    M: Message + Send + Sync + Debug,
     S: Unpin + AsyncRead + AsyncWrite,
     T: Unpin + AsyncRead + AsyncWrite,
 >(
     mut connection: Connection<S, T>,
-    mut connrx: UnboundedReceiver<(Option<i64>, Chan, bool)>,
+    mut connrx: UnboundedReceiver<(Option<i64>, Chan<M>, bool)>,
     pool: &PgPool,
-) -> (Option<i64>, Chan) {
+) -> (Option<i64>, Chan<M>) {
     let mut stream = futures::stream::poll_fn(move |cx| connection.poll_message(cx));
     let mut state = ConnState::Buffering {
         buffer: VecDeque::new(),
@@ -50,8 +48,8 @@ async fn poll_and_broadcast<
                 } else {
                     let mut idx = idx;
                     while let Some(message) = buffer.pop_front() {
-                        if idx.is_none() || idx.is_some_and(|idx| message.idx > idx) {
-                            idx = Some(message.idx);
+                        if idx.is_none() || idx.is_some_and(|idx| message.get_idx() > idx) {
+                            idx = Some(message.get_idx());
                             trace!("broadcasting {:?}", message);
                             chan.send(Arc::new(message)).unwrap();
                         }
@@ -70,19 +68,14 @@ async fn poll_and_broadcast<
                         break;
                     }
                     Some(Ok(AsyncMessage::Notification(notification))) => {
-                        let (idx, inserted, payload) = parse_message(notification.payload()).await;
-                        let payload = match payload {
-                            Some(payload) => payload,
-                            None => pool.get_payload(idx).await,
-                        };
-                        let message = Message {idx, inserted, payload};
+                        let message = M::from_str(notification.payload(), pool).await;
                         match state {
                             ConnState::Buffering { ref mut buffer } => {
                                 trace!("buffering {:?}", message);
                                 buffer.push_back(message);
                             }
                             ConnState::Streaming {ref mut idx, ref chan} => {
-                                *idx = Some(message.idx);
+                                *idx = Some(message.get_idx());
                                 trace!("broadcasting {:?}", message);
                                 chan.send(Arc::new(message)).unwrap();
                             }
@@ -104,38 +97,31 @@ async fn poll_and_broadcast<
     }
 }
 
-async fn select_and_broadcast(
+async fn select_and_broadcast<M: Message + Send + Sync + Debug>(
     idx: Option<i64>,
-    chan: Chan,
+    chan: Chan<M>,
     client: &Client,
-) -> (Option<i64>, Chan, bool) {
+) -> (Option<i64>, Chan<M>, bool) {
     let mut idx = idx;
-    let error = match client.execute("listen event", &[]).await {
-        Ok(_) => {
-            let query = "select idx, inserted, payload from events where idx > $1 order by idx";
-            match client.query_raw(query, &[&idx]).await {
-                Ok(stream) => {
-                    pin_mut!(stream);
-                    loop {
-                        match stream.try_next().await {
-                            Ok(Some(row)) => {
-                                let message = Message {
-                                    idx: row.get(0),
-                                    inserted: row.get(1),
-                                    payload: row.get(2),
-                                };
-                                trace!("selected message {:?}", message);
-                                idx = Some(message.idx);
-                                chan.send(Arc::new(message)).unwrap();
-                            }
-                            Ok(None) => break None,
-                            Err(error) => break Some(error),
+    let error = match client.execute(M::listen_query(), &[]).await {
+        Ok(_) => match client.query_raw(M::select_query(), &[&idx]).await {
+            Ok(stream) => {
+                pin_mut!(stream);
+                loop {
+                    match stream.try_next().await {
+                        Ok(Some(row)) => {
+                            let message = M::from_row(row);
+                            trace!("selected message {:?}", message);
+                            idx = Some(message.get_idx());
+                            chan.send(Arc::new(message)).unwrap();
                         }
+                        Ok(None) => break None,
+                        Err(error) => break Some(error),
                     }
                 }
-                Err(error) => Some(error),
             }
-        }
+            Err(error) => Some(error),
+        },
         Err(error) => Some(error),
     };
     if let Some(ref error) = error {
@@ -144,12 +130,12 @@ async fn select_and_broadcast(
     (idx, chan, error.is_some())
 }
 
-async fn tail_once(
+async fn tail_once<M: Message + Send + Sync + Debug + 'static>(
     idx: Option<i64>,
-    chan: Chan,
+    chan: Chan<M>,
     config: &Config,
     pool: Arc<PgPool>,
-) -> (Option<i64>, Chan) {
+) -> (Option<i64>, Chan<M>) {
     match config.connect(NoTls).await {
         Ok((client, connection)) => {
             trace!("connected");
@@ -167,7 +153,10 @@ async fn tail_once(
     }
 }
 
-pub fn start_broadcaster(config: Config, pool: Arc<PgPool>) -> broadcast::Receiver<Arc<Message>> {
+pub fn start_broadcaster<M: Message + Send + Sync + Debug + 'static>(
+    config: Config,
+    pool: Arc<PgPool>,
+) -> broadcast::Receiver<Arc<M>> {
     let (msgtx, msgrx) = broadcast::channel(16);
     tokio::spawn(async move {
         let mut idx = Some(32);
