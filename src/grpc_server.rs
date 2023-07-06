@@ -2,8 +2,10 @@ use crate::{message::EventMessage, pgpool::PgPool};
 use anystruct::{IntoJSON, IntoProto};
 use eventsapis_proto::{
     events_apis_server::{EventsApis, EventsApisServer},
-    GetEventRequest, GetEventResponse, GetLastIdxRequest, GetLastIdxResponse, InsertEventRequest,
-    InsertEventResponse, PollEventsRequest, PollEventsResponse,
+    GetCommandRequest, GetCommandResponse, GetEventRequest, GetEventResponse, GetLastIdxRequest,
+    GetLastIdxResponse, InsertEventRequest, InsertEventResponse, IssueCommandRequest,
+    IssueCommandResponse, PollCommandsRequest, PollCommandsResponse, PollEventsRequest,
+    PollEventsResponse,
 };
 use futures::pin_mut;
 use log::trace;
@@ -29,6 +31,7 @@ impl GrpcServer {
 #[tonic::async_trait]
 impl EventsApis for GrpcServer {
     type PollEventsStream = ReceiverStream<Result<PollEventsResponse, Status>>;
+    type PollCommandsStream = ReceiverStream<Result<PollCommandsResponse, Status>>;
 
     async fn get_last_idx(
         &self,
@@ -84,6 +87,27 @@ impl EventsApis for GrpcServer {
         let pool = self.pool.clone();
         tokio::spawn(async move { handle_poll_events(pool, last_idx, tx, eventrx).await });
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn issue_command(
+        &self,
+        request: Request<IssueCommandRequest>,
+    ) -> Result<Response<IssueCommandResponse>, Status> {
+        todo!();
+    }
+
+    async fn get_command(
+        &self,
+        request: Request<GetCommandRequest>,
+    ) -> Result<Response<GetCommandResponse>, Status> {
+        todo!();
+    }
+
+    async fn poll_commands(
+        &self,
+        request: Request<PollCommandsRequest>,
+    ) -> Result<Response<Self::PollCommandsStream>, Status> {
+        todo!();
     }
 }
 
