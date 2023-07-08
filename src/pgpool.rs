@@ -115,9 +115,9 @@ impl PgPool {
         let result = client.execute("insert into issued_commands (command_id, command_type, command_data) values ($1, $2, $3)", &[&command_id, &command_type, &command_data]).await;
         self.put_client(client).await;
         match result {
-            Ok(_) => Ok(true),
+            Ok(_) => Ok(false),
             Err(err) => match err.as_db_error().map(|x| x.constraint()) {
-                Some(Some(s)) if s == "issued_commands_pkey" => Ok(false),
+                Some(Some(s)) if s == "issued_commands_pkey" => Ok(true),
                 _ => Err(err),
             },
         }

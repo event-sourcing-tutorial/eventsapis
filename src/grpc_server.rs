@@ -103,12 +103,12 @@ impl EventsApis for GrpcServer {
             .map_err(|_e| Status::new(tonic::Code::InvalidArgument, "invalid uuid format"))?;
         let command_data = command_data
             .ok_or_else(|| Status::new(tonic::Code::InvalidArgument, "missing command data"))?;
-        let success = self
+        let already_exists = self
             .pool
             .try_issue_command(command_id, command_type, command_data.into_json())
             .await
             .map_err(|_| Status::new(tonic::Code::Internal, "failed to insert"))?;
-        Ok(Response::new(IssueCommandResponse { success }))
+        Ok(Response::new(IssueCommandResponse { already_exists }))
     }
 
     async fn get_command(
