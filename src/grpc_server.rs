@@ -16,6 +16,7 @@ use tokio::sync::{
 };
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::{transport::Server, Request, Response, Status};
+use uuid::Uuid;
 
 struct GrpcServer {
     pool: Arc<PgPool>,
@@ -93,19 +94,33 @@ impl EventsApis for GrpcServer {
         &self,
         request: Request<IssueCommandRequest>,
     ) -> Result<Response<IssueCommandResponse>, Status> {
-        todo!();
+        let IssueCommandRequest {
+            command_id,
+            command_type,
+            command_data,
+        } = request.into_inner();
+        let command_id = Uuid::parse_str(&command_id)
+            .map_err(|_e| Status::new(tonic::Code::InvalidArgument, "invalid uuid format"))?;
+        let command_data = command_data
+            .ok_or_else(|| Status::new(tonic::Code::InvalidArgument, "missing command data"))?;
+        let success = self
+            .pool
+            .try_issue_command(command_id, command_type, command_data.into_json())
+            .await
+            .map_err(|_| Status::new(tonic::Code::Internal, "failed to insert"))?;
+        Ok(Response::new(IssueCommandResponse { success }))
     }
 
     async fn get_command(
         &self,
-        request: Request<GetCommandRequest>,
+        _request: Request<GetCommandRequest>,
     ) -> Result<Response<GetCommandResponse>, Status> {
         todo!();
     }
 
     async fn poll_commands(
         &self,
-        request: Request<PollCommandsRequest>,
+        _request: Request<PollCommandsRequest>,
     ) -> Result<Response<Self::PollCommandsStream>, Status> {
         todo!();
     }

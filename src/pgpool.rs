@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::time::{Duration, SystemTime};
 use tokio::time::sleep;
 use tokio_postgres::{Client, Config, Error, NoTls};
+use uuid::Uuid;
 
 pub struct PgPool {
     config: Config,
@@ -101,6 +102,24 @@ impl PgPool {
         match result {
             Some(row) => Ok(Some((row.get(0), row.get(1)))),
             None => Ok(None),
+        }
+    }
+
+    pub async fn try_issue_command(
+        &self,
+        command_id: Uuid,
+        command_type: String,
+        command_data: Value,
+    ) -> Result<bool, Error> {
+        let client = self.get_client().await?;
+        let result = client.execute("insert into issued_commands (command_id, command_type, command_data) values ($1, $2, $3)", &[&command_id, &command_type, &command_data]).await;
+        self.put_client(client).await;
+        match result {
+            Ok(_) => Ok(true),
+            Err(err) => match err.as_db_error().map(|x| x.constraint()) {
+                Some(Some(s)) if s == "issued_commands_pkey" => Ok(false),
+                _ => Err(err),
+            },
         }
     }
 }
