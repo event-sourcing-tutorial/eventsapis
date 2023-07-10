@@ -3,9 +3,9 @@ use anystruct::{IntoJSON, IntoProto};
 use eventsapis_proto::{
     events_apis_server::{EventsApis, EventsApisServer},
     GetCommandRequest, GetCommandResponse, GetEventRequest, GetEventResponse, GetLastIdxRequest,
-    GetLastIdxResponse, InsertEventRequest, InsertEventResponse, IssueCommandRequest,
-    IssueCommandResponse, PollCommandsRequest, PollCommandsResponse, PollEventsRequest,
-    PollEventsResponse,
+    GetLastIdxResponse, GetQueueRequest, GetQueueResponse, InsertEventRequest, InsertEventResponse,
+    IssueCommandRequest, IssueCommandResponse, PollCommandsRequest, PollCommandsResponse,
+    PollEventsRequest, PollEventsResponse,
 };
 use futures::pin_mut;
 use log::trace;
@@ -122,6 +122,13 @@ impl EventsApis for GrpcServer {
         &self,
         _request: Request<PollCommandsRequest>,
     ) -> Result<Response<Self::PollCommandsStream>, Status> {
+        todo!();
+    }
+
+    async fn get_queue(
+        &self,
+        _request: Request<GetQueueRequest>,
+    ) -> Result<Response<GetQueueResponse>, Status> {
         todo!();
     }
 }
