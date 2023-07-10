@@ -5,7 +5,7 @@ use eventsapis_proto::{
     GetCommandRequest, GetCommandResponse, GetEventRequest, GetEventResponse, GetLastIdxRequest,
     GetLastIdxResponse, GetQueueRequest, GetQueueResponse, InsertEventRequest, InsertEventResponse,
     IssueCommandRequest, IssueCommandResponse, PollCommandsRequest, PollCommandsResponse,
-    PollEventsRequest, PollEventsResponse,
+    PollEventsRequest, PollEventsResponse, QueueEntry,
 };
 use futures::pin_mut;
 use log::trace;
@@ -127,9 +127,25 @@ impl EventsApis for GrpcServer {
 
     async fn get_queue(
         &self,
-        _request: Request<GetQueueRequest>,
+        _: Request<GetQueueRequest>,
     ) -> Result<Response<GetQueueResponse>, Status> {
-        todo!();
+        let result = self
+            .pool
+            .get_queue()
+            .await
+            .map_err(|_| Status::new(tonic::Code::Internal, "failed to query"))?;
+        let entries = result
+            .into_iter()
+            .map(
+                |(command_id, command_type, command_data, inserted)| QueueEntry {
+                    command_id: command_id.to_string(),
+                    command_type,
+                    command_data: Some(command_data.into_proto()),
+                    inserted: Some(inserted.into()),
+                },
+            )
+            .collect();
+        Ok(Response::new(GetQueueResponse { entries }))
     }
 }
 

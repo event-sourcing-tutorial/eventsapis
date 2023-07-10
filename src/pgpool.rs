@@ -122,4 +122,19 @@ impl PgPool {
             },
         }
     }
+
+    pub async fn get_queue(&self) -> Result<Vec<(Uuid, String, Value, SystemTime)>, Error> {
+        let client = self.get_client().await?;
+        let query = "select A.command_id, A.command_type, A.command_data, A.inserted
+                     from issued_commands A
+                       left join finalized_commands B on A.command_id = B.command_id
+                     where B.command_id is null
+                     order by A.inserted";
+        let result = client.query(query, &[]).await?;
+        self.put_client(client).await;
+        Ok(result
+            .into_iter()
+            .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
+            .collect())
+    }
 }
