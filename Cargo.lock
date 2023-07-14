@@ -340,6 +340,7 @@ dependencies = [
 name = "eventsapis"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "anystruct",
  "async-trait",
  "clap",

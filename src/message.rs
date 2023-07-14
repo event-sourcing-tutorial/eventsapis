@@ -1,10 +1,15 @@
 use crate::pgpool::PgPool;
+use anyhow::{anyhow, bail};
 use async_trait::async_trait;
 use log::debug;
 use serde_json::Value;
 use std::{fmt::Debug, str::from_utf8, time::SystemTime};
 use time::{format_description::well_known::Iso8601, OffsetDateTime};
-use tokio_postgres::Row;
+use tokio_postgres::{
+    types::{FromSql, Type},
+    Row,
+};
+use uuid::Uuid;
 
 #[async_trait]
 pub trait Message: Send + Sync + Debug + 'static {
@@ -95,5 +100,83 @@ pub async fn parse_message(message: &str, pool: &PgPool) -> EventMessage {
         idx,
         inserted,
         payload,
+    }
+}
+
+#[derive(Debug)]
+pub enum CommandStatus {
+    Issued,
+    Finalized,
+}
+
+impl<'a> FromSql<'a> for CommandStatus {
+    fn from_sql(
+        _ty: &Type,
+        _raw: &'a [u8],
+    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        todo!();
+    }
+    fn accepts(ty: &Type) -> bool {
+        todo!("unknown type {} {:?}", ty.name(), ty);
+    }
+}
+
+#[derive(Debug)]
+pub enum CommandFinalStatus {
+    Succeeded,
+    Failed,
+    Aborted,
+}
+
+impl<'a> FromSql<'a> for CommandFinalStatus {
+    fn from_sql(
+        _ty: &Type,
+        raw: &'a [u8],
+    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        match raw {
+            b"succeeded" => Ok(CommandFinalStatus::Succeeded),
+            b"failed" => Ok(CommandFinalStatus::Failed),
+            b"aborted" => Ok(CommandFinalStatus::Aborted),
+            _ => Err(anyhow!("invalid final_status {:?}", raw).into()),
+        }
+    }
+    fn accepts(ty: &Type) -> bool {
+        ty.name() == "final_status"
+    }
+}
+
+#[derive(Debug)]
+pub struct QueueMessage {
+    pub idx: i64,
+    pub command_id: Uuid,
+    pub status: CommandStatus,
+    pub updated: SystemTime,
+}
+
+#[async_trait]
+impl Message for QueueMessage {
+    fn get_idx(&self) -> i64 {
+        self.idx
+    }
+
+    fn listen_query() -> &'static str {
+        "listen command"
+    }
+
+    fn select_query() -> &'static str {
+        "select idx, command_id, status, updated from command_stream where idx > $1 order by idx"
+    }
+
+    fn from_row(row: Row) -> Self {
+        Self {
+            idx: row.get("idx"),
+            command_id: row.get("command_id"),
+            status: row.get("status"),
+            updated: row.get("updated"),
+        }
+    }
+
+    async fn from_str(_payload: &str, _pool: &PgPool) -> Self {
+        todo!();
     }
 }

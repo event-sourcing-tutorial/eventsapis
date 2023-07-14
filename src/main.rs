@@ -16,7 +16,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .password(password)
         .clone();
     let pool = Arc::new(pgpool::PgPool::new(config.clone()));
-    let msgrx = start_broadcaster(config, pool.clone());
-    grpc_server::start(pool.clone(), msgrx).await?;
+    let eventrx = start_broadcaster(config.clone(), pool.clone());
+    let queuerx = start_broadcaster(config, pool.clone());
+    grpc_server::start(pool, eventrx, queuerx).await?;
     Ok(())
 }

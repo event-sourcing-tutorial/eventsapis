@@ -1,11 +1,15 @@
-use crate::{message::EventMessage, pgpool::PgPool};
+use crate::{
+    message::{CommandFinalStatus, EventMessage, QueueMessage},
+    pgpool::PgPool,
+};
 use anystruct::{IntoJSON, IntoProto};
 use eventsapis_proto::{
     events_apis_server::{EventsApis, EventsApisServer},
-    GetCommandRequest, GetCommandResponse, GetEventRequest, GetEventResponse, GetLastIdxRequest,
-    GetLastIdxResponse, GetQueueRequest, GetQueueResponse, InsertEventRequest, InsertEventResponse,
-    IssueCommandRequest, IssueCommandResponse, PollCommandsRequest, PollCommandsResponse,
-    PollEventsRequest, PollEventsResponse, QueueEntry,
+    FinalStatus, GetCommandRequest, GetCommandResponse, GetEventLastIdxRequest,
+    GetEventLastIdxResponse, GetEventRequest, GetEventResponse, GetQueueLastIdxRequest,
+    GetQueueLastIdxResponse, GetQueueRequest, GetQueueResponse, InsertEventRequest,
+    InsertEventResponse, IssueCommandRequest, IssueCommandResponse, PollCommandsRequest,
+    PollCommandsResponse, PollEventsRequest, PollEventsResponse, QueueEntry,
 };
 use futures::pin_mut;
 use log::trace;
@@ -21,11 +25,20 @@ use uuid::Uuid;
 struct GrpcServer {
     pool: Arc<PgPool>,
     eventrx: Receiver<Arc<EventMessage>>,
+    queuerx: Receiver<Arc<QueueMessage>>,
 }
 
 impl GrpcServer {
-    pub fn new(pool: Arc<PgPool>, eventrx: Receiver<Arc<EventMessage>>) -> GrpcServer {
-        GrpcServer { pool, eventrx }
+    pub fn new(
+        pool: Arc<PgPool>,
+        eventrx: Receiver<Arc<EventMessage>>,
+        queuerx: Receiver<Arc<QueueMessage>>,
+    ) -> GrpcServer {
+        GrpcServer {
+            pool,
+            eventrx,
+            queuerx,
+        }
     }
 }
 
@@ -34,12 +47,12 @@ impl EventsApis for GrpcServer {
     type PollEventsStream = ReceiverStream<Result<PollEventsResponse, Status>>;
     type PollCommandsStream = ReceiverStream<Result<PollCommandsResponse, Status>>;
 
-    async fn get_last_idx(
+    async fn get_event_last_idx(
         &self,
-        _request: Request<GetLastIdxRequest>,
-    ) -> Result<Response<GetLastIdxResponse>, Status> {
-        match self.pool.try_get_last_index().await {
-            Ok(idx) => Ok(Response::new(GetLastIdxResponse { last_idx: idx })),
+        _request: Request<GetEventLastIdxRequest>,
+    ) -> Result<Response<GetEventLastIdxResponse>, Status> {
+        match self.pool.try_get_event_last_index().await {
+            Ok(idx) => Ok(Response::new(GetEventLastIdxResponse { last_idx: idx })),
             Err(error) => Err(Status::unavailable(error.to_string())),
         }
     }
@@ -63,7 +76,7 @@ impl EventsApis for GrpcServer {
         request: Request<GetEventRequest>,
     ) -> Result<Response<GetEventResponse>, Status> {
         let GetEventRequest { idx } = request.into_inner();
-        match self.pool.try_fetch(idx).await {
+        match self.pool.try_get_event(idx).await {
             Ok(Some((inserted, payload))) => Ok(Response::new(GetEventResponse {
                 found: true,
                 inserted: Some(inserted.into()),
@@ -113,9 +126,43 @@ impl EventsApis for GrpcServer {
 
     async fn get_command(
         &self,
-        _request: Request<GetCommandRequest>,
+        request: Request<GetCommandRequest>,
     ) -> Result<Response<GetCommandResponse>, Status> {
-        todo!();
+        let GetCommandRequest { command_id } = request.into_inner();
+        let command_id = Uuid::parse_str(&command_id)
+            .map_err(|_| Status::invalid_argument("invalid uuid format"))?;
+        match self.pool.try_get_command(command_id).await {
+            Ok(Some((command_type, command_data, inserted, status))) => {
+                Ok(Response::new(GetCommandResponse {
+                    command_type: Some(command_type),
+                    command_data: Some(command_data.into_proto()),
+                    inserted: Some(inserted.into()),
+                    status: match status {
+                        Some(CommandFinalStatus::Succeeded) => Some(FinalStatus::Succeeded.into()),
+                        Some(CommandFinalStatus::Failed) => Some(FinalStatus::Failed.into()),
+                        Some(CommandFinalStatus::Aborted) => Some(FinalStatus::Aborted.into()),
+                        None => None,
+                    },
+                }))
+            }
+            Ok(None) => Ok(Response::new(GetCommandResponse {
+                command_type: None,
+                command_data: None,
+                inserted: None,
+                status: None,
+            })),
+            Err(error) => Err(Status::unknown(error.to_string())),
+        }
+    }
+
+    async fn get_queue_last_idx(
+        &self,
+        _request: Request<GetQueueLastIdxRequest>,
+    ) -> Result<Response<GetQueueLastIdxResponse>, Status> {
+        match self.pool.try_get_queue_last_index().await {
+            Ok(idx) => Ok(Response::new(GetQueueLastIdxResponse { last_idx: idx })),
+            Err(error) => Err(Status::unavailable(error.to_string())),
+        }
     }
 
     async fn poll_commands(
@@ -249,13 +296,15 @@ async fn handle_poll_events(
 pub async fn start(
     pool: Arc<PgPool>,
     eventrx: Receiver<Arc<EventMessage>>,
+    queuerx: Receiver<Arc<QueueMessage>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let jh1 = tokio::spawn({
         let eventrx = eventrx.resubscribe();
+        let queuerx = queuerx.resubscribe();
         let pool = pool.clone();
         async {
             let addr = "0.0.0.0:40001".parse().unwrap();
-            let server = GrpcServer::new(pool, eventrx);
+            let server = GrpcServer::new(pool, eventrx, queuerx);
             Server::builder()
                 .add_service(EventsApisServer::new(server))
                 .serve(addr)
@@ -265,7 +314,7 @@ pub async fn start(
     });
     let jh2 = tokio::spawn(async {
         let addr = "0.0.0.0:40002".parse().unwrap();
-        let server = GrpcServer::new(pool, eventrx);
+        let server = GrpcServer::new(pool, eventrx, queuerx);
         Server::builder()
             .accept_http1(true)
             .add_service(tonic_web::enable(EventsApisServer::new(server)))

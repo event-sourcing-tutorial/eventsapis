@@ -1,3 +1,4 @@
+use crate::message::CommandFinalStatus;
 use futures::lock::Mutex;
 use log::error;
 use serde_json::Value;
@@ -59,10 +60,19 @@ impl PgPool {
         }
     }
 
-    pub async fn try_get_last_index(&self) -> Result<i64, Error> {
+    pub async fn try_get_event_last_index(&self) -> Result<i64, Error> {
         let client = self.get_client().await?;
         let row = client
             .query_one("select coalesce(max(idx), 0) from events", &[])
+            .await?;
+        self.put_client(client).await;
+        Ok(row.get(0))
+    }
+
+    pub async fn try_get_queue_last_index(&self) -> Result<i64, Error> {
+        let client = self.get_client().await?;
+        let row = client
+            .query_one("select coalesce(max(idx), 0) from command_stream", &[])
             .await?;
         self.put_client(client).await;
         Ok(row.get(0))
@@ -90,7 +100,7 @@ impl PgPool {
         }
     }
 
-    pub async fn try_fetch(&self, idx: i64) -> Result<Option<(SystemTime, Value)>, Error> {
+    pub async fn try_get_event(&self, idx: i64) -> Result<Option<(SystemTime, Value)>, Error> {
         let client = self.get_client().await?;
         let result = client
             .query_opt(
@@ -101,6 +111,27 @@ impl PgPool {
         self.put_client(client).await;
         match result {
             Some(row) => Ok(Some((row.get(0), row.get(1)))),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn try_get_command(
+        &self,
+        command_id: Uuid,
+    ) -> Result<Option<(String, Value, SystemTime, Option<CommandFinalStatus>)>, Error> {
+        let client = self.get_client().await?;
+        let result = client
+            .query_opt(
+                "select A.command_type, A.command_data, A.inserted, B.status
+                from issued_commands A
+                left join finalized_commands B on A.command_id = B.command_id
+                where A.command_id = $1",
+                &[&command_id],
+            )
+            .await?;
+        self.put_client(client).await;
+        match result {
+            Some(row) => Ok(Some((row.get(0), row.get(1), row.get(2), row.get(3)))),
             None => Ok(None),
         }
     }
