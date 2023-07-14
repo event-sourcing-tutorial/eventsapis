@@ -1,9 +1,11 @@
+use crate::message::CommandFinalStatus;
 use futures::lock::Mutex;
 use log::error;
 use serde_json::Value;
 use std::time::{Duration, SystemTime};
 use tokio::time::sleep;
 use tokio_postgres::{Client, Config, Error, NoTls};
+use uuid::Uuid;
 
 pub struct PgPool {
     config: Config,
@@ -58,10 +60,19 @@ impl PgPool {
         }
     }
 
-    pub async fn try_get_last_index(&self) -> Result<i64, Error> {
+    pub async fn try_get_event_last_index(&self) -> Result<i64, Error> {
         let client = self.get_client().await?;
         let row = client
             .query_one("select coalesce(max(idx), 0) from events", &[])
+            .await?;
+        self.put_client(client).await;
+        Ok(row.get(0))
+    }
+
+    pub async fn try_get_queue_last_index(&self) -> Result<i64, Error> {
+        let client = self.get_client().await?;
+        let row = client
+            .query_one("select coalesce(max(idx), 0) from command_stream", &[])
             .await?;
         self.put_client(client).await;
         Ok(row.get(0))
@@ -89,7 +100,7 @@ impl PgPool {
         }
     }
 
-    pub async fn try_fetch(&self, idx: i64) -> Result<Option<(SystemTime, Value)>, Error> {
+    pub async fn try_get_event(&self, idx: i64) -> Result<Option<(SystemTime, Value)>, Error> {
         let client = self.get_client().await?;
         let result = client
             .query_opt(
@@ -102,5 +113,59 @@ impl PgPool {
             Some(row) => Ok(Some((row.get(0), row.get(1)))),
             None => Ok(None),
         }
+    }
+
+    pub async fn try_get_command(
+        &self,
+        command_id: Uuid,
+    ) -> Result<Option<(String, Value, SystemTime, Option<CommandFinalStatus>)>, Error> {
+        let client = self.get_client().await?;
+        let result = client
+            .query_opt(
+                "select A.command_type, A.command_data, A.inserted, B.status
+                from issued_commands A
+                left join finalized_commands B on A.command_id = B.command_id
+                where A.command_id = $1",
+                &[&command_id],
+            )
+            .await?;
+        self.put_client(client).await;
+        match result {
+            Some(row) => Ok(Some((row.get(0), row.get(1), row.get(2), row.get(3)))),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn try_issue_command(
+        &self,
+        command_id: Uuid,
+        command_type: String,
+        command_data: Value,
+    ) -> Result<bool, Error> {
+        let client = self.get_client().await?;
+        let result = client.execute("insert into issued_commands (command_id, command_type, command_data) values ($1, $2, $3)", &[&command_id, &command_type, &command_data]).await;
+        self.put_client(client).await;
+        match result {
+            Ok(_) => Ok(false),
+            Err(err) => match err.as_db_error().map(|x| x.constraint()) {
+                Some(Some(s)) if s == "issued_commands_pkey" => Ok(true),
+                _ => Err(err),
+            },
+        }
+    }
+
+    pub async fn get_queue(&self) -> Result<Vec<(Uuid, String, Value, SystemTime)>, Error> {
+        let client = self.get_client().await?;
+        let query = "select A.command_id, A.command_type, A.command_data, A.inserted
+                     from issued_commands A
+                       left join finalized_commands B on A.command_id = B.command_id
+                     where B.command_id is null
+                     order by A.inserted";
+        let result = client.query(query, &[]).await?;
+        self.put_client(client).await;
+        Ok(result
+            .into_iter()
+            .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
+            .collect())
     }
 }

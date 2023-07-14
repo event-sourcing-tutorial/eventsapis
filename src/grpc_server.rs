@@ -1,9 +1,15 @@
-use crate::{message::EventMessage, pgpool::PgPool};
+use crate::{
+    message::{CommandFinalStatus, EventMessage, QueueMessage},
+    pgpool::PgPool,
+};
 use anystruct::{IntoJSON, IntoProto};
 use eventsapis_proto::{
     events_apis_server::{EventsApis, EventsApisServer},
-    GetEventRequest, GetEventResponse, GetLastIdxRequest, GetLastIdxResponse, InsertEventRequest,
-    InsertEventResponse, PollEventsRequest, PollEventsResponse,
+    FinalStatus, GetCommandRequest, GetCommandResponse, GetEventLastIdxRequest,
+    GetEventLastIdxResponse, GetEventRequest, GetEventResponse, GetQueueLastIdxRequest,
+    GetQueueLastIdxResponse, GetQueueRequest, GetQueueResponse, InsertEventRequest,
+    InsertEventResponse, IssueCommandRequest, IssueCommandResponse, PollCommandsRequest,
+    PollCommandsResponse, PollEventsRequest, PollEventsResponse, QueueEntry,
 };
 use futures::pin_mut;
 use log::trace;
@@ -14,28 +20,39 @@ use tokio::sync::{
 };
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::{transport::Server, Request, Response, Status};
+use uuid::Uuid;
 
 struct GrpcServer {
     pool: Arc<PgPool>,
     eventrx: Receiver<Arc<EventMessage>>,
+    queuerx: Receiver<Arc<QueueMessage>>,
 }
 
 impl GrpcServer {
-    pub fn new(pool: Arc<PgPool>, eventrx: Receiver<Arc<EventMessage>>) -> GrpcServer {
-        GrpcServer { pool, eventrx }
+    pub fn new(
+        pool: Arc<PgPool>,
+        eventrx: Receiver<Arc<EventMessage>>,
+        queuerx: Receiver<Arc<QueueMessage>>,
+    ) -> GrpcServer {
+        GrpcServer {
+            pool,
+            eventrx,
+            queuerx,
+        }
     }
 }
 
 #[tonic::async_trait]
 impl EventsApis for GrpcServer {
     type PollEventsStream = ReceiverStream<Result<PollEventsResponse, Status>>;
+    type PollCommandsStream = ReceiverStream<Result<PollCommandsResponse, Status>>;
 
-    async fn get_last_idx(
+    async fn get_event_last_idx(
         &self,
-        _request: Request<GetLastIdxRequest>,
-    ) -> Result<Response<GetLastIdxResponse>, Status> {
-        match self.pool.try_get_last_index().await {
-            Ok(idx) => Ok(Response::new(GetLastIdxResponse { last_idx: idx })),
+        _request: Request<GetEventLastIdxRequest>,
+    ) -> Result<Response<GetEventLastIdxResponse>, Status> {
+        match self.pool.try_get_event_last_index().await {
+            Ok(idx) => Ok(Response::new(GetEventLastIdxResponse { last_idx: idx })),
             Err(error) => Err(Status::unavailable(error.to_string())),
         }
     }
@@ -59,7 +76,7 @@ impl EventsApis for GrpcServer {
         request: Request<GetEventRequest>,
     ) -> Result<Response<GetEventResponse>, Status> {
         let GetEventRequest { idx } = request.into_inner();
-        match self.pool.try_fetch(idx).await {
+        match self.pool.try_get_event(idx).await {
             Ok(Some((inserted, payload))) => Ok(Response::new(GetEventResponse {
                 found: true,
                 inserted: Some(inserted.into()),
@@ -84,6 +101,98 @@ impl EventsApis for GrpcServer {
         let pool = self.pool.clone();
         tokio::spawn(async move { handle_poll_events(pool, last_idx, tx, eventrx).await });
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn issue_command(
+        &self,
+        request: Request<IssueCommandRequest>,
+    ) -> Result<Response<IssueCommandResponse>, Status> {
+        let IssueCommandRequest {
+            command_id,
+            command_type,
+            command_data,
+        } = request.into_inner();
+        let command_id = Uuid::parse_str(&command_id)
+            .map_err(|_e| Status::new(tonic::Code::InvalidArgument, "invalid uuid format"))?;
+        let command_data = command_data
+            .ok_or_else(|| Status::new(tonic::Code::InvalidArgument, "missing command data"))?;
+        let already_exists = self
+            .pool
+            .try_issue_command(command_id, command_type, command_data.into_json())
+            .await
+            .map_err(|_| Status::new(tonic::Code::Internal, "failed to insert"))?;
+        Ok(Response::new(IssueCommandResponse { already_exists }))
+    }
+
+    async fn get_command(
+        &self,
+        request: Request<GetCommandRequest>,
+    ) -> Result<Response<GetCommandResponse>, Status> {
+        let GetCommandRequest { command_id } = request.into_inner();
+        let command_id = Uuid::parse_str(&command_id)
+            .map_err(|_| Status::invalid_argument("invalid uuid format"))?;
+        match self.pool.try_get_command(command_id).await {
+            Ok(Some((command_type, command_data, inserted, status))) => {
+                Ok(Response::new(GetCommandResponse {
+                    command_type: Some(command_type),
+                    command_data: Some(command_data.into_proto()),
+                    inserted: Some(inserted.into()),
+                    status: match status {
+                        Some(CommandFinalStatus::Succeeded) => Some(FinalStatus::Succeeded.into()),
+                        Some(CommandFinalStatus::Failed) => Some(FinalStatus::Failed.into()),
+                        Some(CommandFinalStatus::Aborted) => Some(FinalStatus::Aborted.into()),
+                        None => None,
+                    },
+                }))
+            }
+            Ok(None) => Ok(Response::new(GetCommandResponse {
+                command_type: None,
+                command_data: None,
+                inserted: None,
+                status: None,
+            })),
+            Err(error) => Err(Status::unknown(error.to_string())),
+        }
+    }
+
+    async fn get_queue_last_idx(
+        &self,
+        _request: Request<GetQueueLastIdxRequest>,
+    ) -> Result<Response<GetQueueLastIdxResponse>, Status> {
+        match self.pool.try_get_queue_last_index().await {
+            Ok(idx) => Ok(Response::new(GetQueueLastIdxResponse { last_idx: idx })),
+            Err(error) => Err(Status::unavailable(error.to_string())),
+        }
+    }
+
+    async fn poll_commands(
+        &self,
+        _request: Request<PollCommandsRequest>,
+    ) -> Result<Response<Self::PollCommandsStream>, Status> {
+        todo!();
+    }
+
+    async fn get_queue(
+        &self,
+        _: Request<GetQueueRequest>,
+    ) -> Result<Response<GetQueueResponse>, Status> {
+        let result = self
+            .pool
+            .get_queue()
+            .await
+            .map_err(|_| Status::new(tonic::Code::Internal, "failed to query"))?;
+        let entries = result
+            .into_iter()
+            .map(
+                |(command_id, command_type, command_data, inserted)| QueueEntry {
+                    command_id: command_id.to_string(),
+                    command_type,
+                    command_data: Some(command_data.into_proto()),
+                    inserted: Some(inserted.into()),
+                },
+            )
+            .collect();
+        Ok(Response::new(GetQueueResponse { entries }))
     }
 }
 
@@ -187,13 +296,15 @@ async fn handle_poll_events(
 pub async fn start(
     pool: Arc<PgPool>,
     eventrx: Receiver<Arc<EventMessage>>,
+    queuerx: Receiver<Arc<QueueMessage>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let jh1 = tokio::spawn({
         let eventrx = eventrx.resubscribe();
+        let queuerx = queuerx.resubscribe();
         let pool = pool.clone();
         async {
             let addr = "0.0.0.0:40001".parse().unwrap();
-            let server = GrpcServer::new(pool, eventrx);
+            let server = GrpcServer::new(pool, eventrx, queuerx);
             Server::builder()
                 .add_service(EventsApisServer::new(server))
                 .serve(addr)
@@ -203,7 +314,7 @@ pub async fn start(
     });
     let jh2 = tokio::spawn(async {
         let addr = "0.0.0.0:40002".parse().unwrap();
-        let server = GrpcServer::new(pool, eventrx);
+        let server = GrpcServer::new(pool, eventrx, queuerx);
         Server::builder()
             .accept_http1(true)
             .add_service(tonic_web::enable(EventsApisServer::new(server)))
