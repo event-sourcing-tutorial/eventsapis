@@ -22,7 +22,8 @@ enum ConnState<M> {
 }
 
 async fn poll_and_broadcast<
-    M: Message,
+    R,
+    M: Message<R>,
     S: Unpin + AsyncRead + AsyncWrite,
     T: Unpin + AsyncRead + AsyncWrite,
 >(
@@ -97,7 +98,7 @@ async fn poll_and_broadcast<
     }
 }
 
-async fn select_and_broadcast<M: Message>(
+async fn select_and_broadcast<R, M: Message<R>>(
     idx: Option<i64>,
     chan: Chan<M>,
     client: &Client,
@@ -130,7 +131,7 @@ async fn select_and_broadcast<M: Message>(
     (idx, chan, error.is_some())
 }
 
-async fn tail_once<M: Message>(
+async fn tail_once<R, M: Message<R>>(
     idx: Option<i64>,
     chan: Chan<M>,
     config: &Config,
@@ -153,7 +154,7 @@ async fn tail_once<M: Message>(
     }
 }
 
-pub fn start_broadcaster<M: Message>(
+pub fn start_broadcaster<R, M: Message<R>>(
     config: Config,
     pool: Arc<PgPool>,
 ) -> broadcast::Receiver<Arc<M>> {

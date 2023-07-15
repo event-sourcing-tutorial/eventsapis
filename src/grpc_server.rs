@@ -1,5 +1,5 @@
 use crate::{
-    message::{CommandFinalStatus, EventMessage, QueueMessage},
+    message::{CommandFinalStatus, EventMessage, Message, QueueMessage},
     pgpool::PgPool,
 };
 use anystruct::{IntoJSON, IntoProto};
@@ -13,7 +13,7 @@ use eventsapis_proto::{
 };
 use futures::pin_mut;
 use log::trace;
-use std::{sync::Arc, time::SystemTime};
+use std::sync::Arc;
 use tokio::sync::{
     broadcast::{error::RecvError, Receiver},
     mpsc,
@@ -167,9 +167,14 @@ impl EventsApis for GrpcServer {
 
     async fn poll_commands(
         &self,
-        _request: Request<PollCommandsRequest>,
+        request: Request<PollCommandsRequest>,
     ) -> Result<Response<Self::PollCommandsStream>, Status> {
-        todo!();
+        let PollCommandsRequest { last_idx } = request.into_inner();
+        let (tx, rx) = mpsc::channel(16);
+        let queuerx = self.queuerx.resubscribe();
+        let pool = self.pool.clone();
+        tokio::spawn(async move { handle_poll_events(pool, last_idx, tx, queuerx).await });
+        Ok(Response::new(Self::PollCommandsStream::new(rx)))
     }
 
     async fn get_queue(
@@ -196,34 +201,22 @@ impl EventsApis for GrpcServer {
     }
 }
 
-async fn select_phase(
+async fn select_phase<R, M: Message<R>>(
     mut last_idx: i64,
     pool: Arc<PgPool>,
-    tx: &mpsc::Sender<Result<PollEventsResponse, Status>>,
+    tx: &mpsc::Sender<Result<R, Status>>,
 ) -> Result<Option<i64>, tokio_postgres::Error> {
     let client = pool.get_client().await?;
-    let stream = client
-        .query_raw(
-            "select idx, inserted, payload from events where idx > $1 order by idx",
-            &[&last_idx],
-        )
-        .await?;
+    let stream = client.query_raw(M::select_query(), &[&last_idx]).await?;
     pin_mut!(stream);
     loop {
         match stream.try_next().await? {
             None => break,
             Some(row) => {
-                let idx = row.get(0);
+                let message = M::from_row(row);
+                let idx = message.get_idx();
                 assert!(idx == last_idx + 1);
-                let inserted: SystemTime = row.get(1);
-                let payload: serde_json::Value = row.get(2);
-                let result = tx
-                    .send(Ok(PollEventsResponse {
-                        idx,
-                        inserted: Some(inserted.into()),
-                        payload: Some(payload.into_proto()),
-                    }))
-                    .await;
+                let result = tx.send(Ok(message.into_response())).await;
                 match result {
                     Ok(()) => {
                         last_idx = idx;
@@ -240,23 +233,17 @@ async fn select_phase(
     Ok(Some(last_idx))
 }
 
-async fn stream_phase(
+async fn stream_phase<R, M: Message<R>>(
     mut last_idx: i64,
-    eventrx: &mut Receiver<Arc<EventMessage>>,
-    tx: &mpsc::Sender<Result<PollEventsResponse, Status>>,
+    eventrx: &mut Receiver<Arc<M>>,
+    tx: &mpsc::Sender<Result<R, Status>>,
 ) -> Result<Option<i64>, tokio_postgres::Error> {
     loop {
         match eventrx.recv().await {
             Ok(message) => {
-                let idx = message.idx;
+                let idx = message.get_idx();
                 if idx == last_idx + 1 {
-                    let result = tx
-                        .send(Ok(PollEventsResponse {
-                            idx,
-                            inserted: Some(message.inserted.into()),
-                            payload: Some(message.payload.clone().into_proto()),
-                        }))
-                        .await;
+                    let result = tx.send(Ok(message.into_response())).await;
                     match result {
                         Ok(()) => last_idx = idx,
                         Err(_) => return Ok(None),
@@ -272,14 +259,14 @@ async fn stream_phase(
     }
 }
 
-async fn handle_poll_events(
+async fn handle_poll_events<R, M: Message<R>>(
     pool: Arc<PgPool>,
     mut last_idx: i64,
-    tx: mpsc::Sender<Result<PollEventsResponse, Status>>,
-    mut eventrx: Receiver<Arc<EventMessage>>,
+    tx: mpsc::Sender<Result<R, Status>>,
+    mut eventrx: Receiver<Arc<M>>,
 ) -> Result<(), tokio_postgres::Error> {
     loop {
-        match select_phase(last_idx, pool.clone(), &tx).await? {
+        match select_phase::<R, M>(last_idx, pool.clone(), &tx).await? {
             Some(idx) => match stream_phase(idx, &mut eventrx, &tx).await? {
                 Some(idx) => {
                     last_idx = idx;
