@@ -1,6 +1,8 @@
 use crate::pgpool::PgPool;
-use anyhow::{anyhow, bail};
+use anyhow::anyhow;
+use anystruct::IntoProto;
 use async_trait::async_trait;
+use eventsapis_proto::{PollCommandsResponse, PollEventsResponse};
 use log::debug;
 use serde_json::Value;
 use std::{fmt::Debug, str::from_utf8, time::SystemTime};
@@ -12,12 +14,13 @@ use tokio_postgres::{
 use uuid::Uuid;
 
 #[async_trait]
-pub trait Message: Send + Sync + Debug + 'static {
+pub trait Message<R>: Send + Sync + Debug + 'static {
     fn from_row(row: Row) -> Self;
     fn get_idx(&self) -> i64;
     async fn from_str(payload: &str, pool: &PgPool) -> Self;
     fn select_query() -> &'static str;
     fn listen_query() -> &'static str;
+    fn into_response(&self) -> R;
 }
 
 #[derive(Debug)]
@@ -28,7 +31,7 @@ pub struct EventMessage {
 }
 
 #[async_trait]
-impl Message for EventMessage {
+impl Message<PollEventsResponse> for EventMessage {
     fn from_row(row: Row) -> Self {
         EventMessage {
             idx: row.get(0),
@@ -47,6 +50,13 @@ impl Message for EventMessage {
     }
     fn listen_query() -> &'static str {
         "listen event"
+    }
+    fn into_response(&self) -> PollEventsResponse {
+        PollEventsResponse {
+            idx: self.idx,
+            inserted: Some(self.inserted.into()),
+            payload: Some(self.payload.clone().into_proto()),
+        }
     }
 }
 
@@ -154,7 +164,7 @@ pub struct QueueMessage {
 }
 
 #[async_trait]
-impl Message for QueueMessage {
+impl Message<PollCommandsResponse> for QueueMessage {
     fn get_idx(&self) -> i64 {
         self.idx
     }
@@ -178,5 +188,17 @@ impl Message for QueueMessage {
 
     async fn from_str(_payload: &str, _pool: &PgPool) -> Self {
         todo!();
+    }
+
+    fn into_response(&self) -> PollCommandsResponse {
+        PollCommandsResponse {
+            idx: self.idx,
+            command_id: self.command_id.to_string(),
+            status: match self.status {
+                CommandStatus::Issued => eventsapis_proto::CommandStatus::Issued.into(),
+                CommandStatus::Finalized => eventsapis_proto::CommandStatus::Finalized.into(),
+            },
+            updated: Some(self.updated.into()),
+        }
     }
 }
