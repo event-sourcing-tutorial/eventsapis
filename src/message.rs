@@ -122,12 +122,16 @@ pub enum CommandStatus {
 impl<'a> FromSql<'a> for CommandStatus {
     fn from_sql(
         _ty: &Type,
-        _raw: &'a [u8],
+        raw: &'a [u8],
     ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
-        todo!();
+        match raw {
+            b"issued" => Ok(CommandStatus::Issued),
+            b"finalized" => Ok(CommandStatus::Finalized),
+            _ => Err(anyhow!("invalid final_status {:?}", raw).into()),
+        }
     }
     fn accepts(ty: &Type) -> bool {
-        todo!("unknown type {} {:?}", ty.name(), ty);
+        ty.name() == "command_status"
     }
 }
 
