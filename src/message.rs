@@ -119,16 +119,22 @@ pub enum CommandStatus {
     Finalized,
 }
 
+fn parse_command_status(
+    raw: &[u8],
+) -> Result<CommandStatus, Box<dyn std::error::Error + Sync + Send>> {
+    match raw {
+        b"issued" => Ok(CommandStatus::Issued),
+        b"finalized" => Ok(CommandStatus::Finalized),
+        _ => Err(anyhow!("invalid final_status {:?}", raw).into()),
+    }
+}
+
 impl<'a> FromSql<'a> for CommandStatus {
     fn from_sql(
         _ty: &Type,
         raw: &'a [u8],
     ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
-        match raw {
-            b"issued" => Ok(CommandStatus::Issued),
-            b"finalized" => Ok(CommandStatus::Finalized),
-            _ => Err(anyhow!("invalid final_status {:?}", raw).into()),
-        }
+        parse_command_status(raw)
     }
     fn accepts(ty: &Type) -> bool {
         ty.name() == "command_status"
@@ -142,17 +148,23 @@ pub enum CommandFinalStatus {
     Aborted,
 }
 
+fn parse_command_final_status(
+    raw: &[u8],
+) -> Result<CommandFinalStatus, Box<dyn std::error::Error + Sync + Send>> {
+    match raw {
+        b"succeeded" => Ok(CommandFinalStatus::Succeeded),
+        b"failed" => Ok(CommandFinalStatus::Failed),
+        b"aborted" => Ok(CommandFinalStatus::Aborted),
+        _ => Err(anyhow!("invalid final_status {:?}", raw).into()),
+    }
+}
+
 impl<'a> FromSql<'a> for CommandFinalStatus {
     fn from_sql(
         _ty: &Type,
         raw: &'a [u8],
     ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
-        match raw {
-            b"succeeded" => Ok(CommandFinalStatus::Succeeded),
-            b"failed" => Ok(CommandFinalStatus::Failed),
-            b"aborted" => Ok(CommandFinalStatus::Aborted),
-            _ => Err(anyhow!("invalid final_status {:?}", raw).into()),
-        }
+        parse_command_final_status(raw)
     }
     fn accepts(ty: &Type) -> bool {
         ty.name() == "final_status"
@@ -190,8 +202,27 @@ impl Message<PollCommandsResponse> for QueueMessage {
         }
     }
 
-    async fn from_str(_payload: &str, _pool: &PgPool) -> Self {
-        todo!();
+    async fn from_str(message: &str, _pool: &PgPool) -> Self {
+        // message is idx,command_id,status,updated
+        let message = message.replace("\n", ""); // may be a bug in the postgres driver
+        let bytes = message.as_bytes();
+        let i = 0;
+        let (idx, i) = parse_unsigned_i64(bytes, i);
+        let i = parse_comma(bytes, i);
+        let (command_id, i) = parse_noncomma(bytes, i);
+        let i = parse_comma(bytes, i);
+        let (status, i) = parse_noncomma(bytes, i);
+        let i = parse_comma(bytes, i);
+        let (updated, i) = parse_noncomma(bytes, i);
+        assert_eq!(i, bytes.len());
+        let updated = format!("{}Z", updated);
+        let updated: OffsetDateTime = OffsetDateTime::parse(&updated, &Iso8601::DEFAULT).unwrap();
+        Self {
+            idx,
+            command_id: Uuid::parse_str(&command_id).unwrap(),
+            status: parse_command_status(status.as_bytes()).unwrap(),
+            updated: updated.into(),
+        }
     }
 
     fn into_response(&self) -> PollCommandsResponse {
